@@ -60,7 +60,7 @@ async fn download_file(
         for link in links {
             let relative_url = get_relative_url_from_url(url.clone());
             let new_url = relative_url.join(link.as_str())?;
-            let file_path = get_file_path_from_url(new_url.clone());
+            let file_path = get_file_path_from_url(&new_url);
             if queue.lock().unwrap().contains(&file_path.clone())
                 || downloaded_files
                     .lock()
@@ -71,9 +71,9 @@ async fn download_file(
             }
             queue.lock().unwrap().push_back(file_path.clone());
         }
-        save_text_to_file(&opt, url.clone(), text_file).await?;
+        save_text_to_file(&opt, &url, text_file).await?;
     } else {
-        save_binary_to_file(&opt, url.clone(), response).await?;
+        save_binary_to_file(&opt, &url, response).await?;
     }
     downloaded_files.lock().unwrap().push(url.to_string());
     println!("downloaded file: {}", url.clone());
@@ -94,8 +94,8 @@ fn get_relative_url_from_url(url: Url) -> Url {
     .unwrap()
 }
 
-fn get_folder_path_from_url(url: Url) -> String {
-    let file_path = get_file_path_from_url(url.clone());
+fn get_folder_path_from_url(url: &Url) -> String {
+    let file_path = get_file_path_from_url(url);
     if file_path.contains("/") {
         let parts: Vec<String> = file_path.split("/").map(|part| part.to_string()).collect();
         return parts
@@ -108,7 +108,7 @@ fn get_folder_path_from_url(url: Url) -> String {
     return String::new();
 }
 
-fn get_file_path_from_url(url: Url) -> String {
+fn get_file_path_from_url(url: &Url) -> String {
     let url_str = url.to_string();
     url_str.replace(
         &format!("{}://{}/", url.scheme(), url.host_str().unwrap()),
@@ -116,24 +116,25 @@ fn get_file_path_from_url(url: Url) -> String {
     )
 }
 
-async fn save_binary_to_file(opt: &Opt, url: Url, response: Response) -> Result<()> {
+async fn save_binary_to_file(opt: &Opt, url: &Url, response: Response) -> Result<()> {
     let bytes = response.bytes().await?;
-    let folder_path = get_folder_path_from_url(url.clone());
+    let folder_path = get_folder_path_from_url(url);
     let complete_path = concat_two_paths(opt.output.clone(), folder_path);
     std::fs::create_dir_all(format!("{}", complete_path))?;
-    let file_path = get_file_path_from_url(url.clone());
+    // let file_path = get_file_path_from_url(url.clone());
+    let file_path = get_file_path_from_url(url);
     let mut file = File::create(format!("{}/{}", opt.output.clone(), file_path)).await?;
     file.write_all(&bytes).await?;
 
     Ok(())
 }
 
-async fn save_text_to_file(opt: &Opt, url: Url, file_str: String) -> Result<()> {
-    let folder_path = get_folder_path_from_url(url.clone());
+async fn save_text_to_file(opt: &Opt, url: &Url, file_str: String) -> Result<()> {
+    let folder_path = get_folder_path_from_url(url);
     let complete_path = concat_two_paths(opt.output.clone(), folder_path);
     let adjusted_complete_path = complete_path.replace("http://", "");
     std::fs::create_dir_all(format!("{}", adjusted_complete_path))?;
-    let file_path = get_file_path_from_url(url.clone());
+    let file_path = get_file_path_from_url(url);
     let mut file = File::create(format!("{}/{}", opt.output.clone(), file_path)).await?;
     for line in file_str.clone().split('\n') {
         file.write_all(line.as_bytes()).await?;
@@ -177,12 +178,6 @@ struct Opt {
         help = OUTPUT_HELP
     )]
     output: String,
-    // #[structopt(
-    //     short,
-    //     long,
-    //     help = MUSIC_HELP
-    // )]
-    // music: bool,
 }
 
 #[tokio::main]
@@ -208,9 +203,11 @@ async fn main() -> Result<()> {
     let mut tasks: Vec<JoinHandle<Result<()>>> = vec![];
 
     loop {
-        let link_maybe = queue.lock().unwrap().pop_front().clone();
+        let link_maybe = queue.lock().unwrap().pop_front();
+        tasks.retain(|task| !task.is_finished());
         if let Some(link) = link_maybe {
-            let url = Url::parse(format!("{}/{}", opt.uri, link.clone()).as_str())?;
+            // let url = Url::parse(format!("{}/{}", opt.uri, link.clone()).as_str())?;
+            let url = Url::parse(format!("{}/{}", opt.uri, link).as_str())?;
             tasks.push(tokio::spawn(download_file(
                 opt.clone(),
                 url,
@@ -229,7 +226,7 @@ async fn main() -> Result<()> {
     }
 
     let index_url = url.join("index.html")?;
-    save_text_to_file(&opt, index_url, html).await?;
+    save_text_to_file(&opt, &index_url, html).await?;
 
     let results = futures::future::join_all(tasks).await;
 
