@@ -13,3 +13,4 @@ scraper = "0.17.1"
 futures = "0.3.28"
 anyhow = "1.0.71"
 tokio = { versopm = "1.28.2", features = ["full"] }
+regex = "1.10.0"

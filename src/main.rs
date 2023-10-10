@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Ok, Result};
+use regex::Regex;
 use reqwest::{Response, Url};
 use scraper::{Html, Selector};
 use structopt::StructOpt;
@@ -52,13 +53,14 @@ async fn download_file(
     url: Url,
     queue: Arc<Mutex<VecDeque<String>>>,
     downloaded_files: Arc<Mutex<Vec<String>>>,
+    visited_urls: Arc<Mutex<Vec<String>>>,
 ) -> Result<()> {
     let response = reqwest::get(url.clone()).await?;
     if is_text_file(&response).await? {
+        let relative_url = get_relative_url_from_url(url.clone());
         let text_file = response.text().await?;
         let links = extract_links(&text_file);
         for link in links {
-            let relative_url = get_relative_url_from_url(url.clone());
             let new_url = relative_url.join(link.as_str())?;
             let file_path = get_file_path_from_url(&new_url);
             if queue.lock().unwrap().contains(&file_path.clone())
@@ -66,6 +68,7 @@ async fn download_file(
                     .lock()
                     .unwrap()
                     .contains(&file_path.clone())
+                || visited_urls.lock().unwrap().contains(&new_url.to_string())
             {
                 continue;
             }
@@ -82,7 +85,7 @@ async fn download_file(
 }
 
 fn get_relative_url_from_url(url: Url) -> Url {
-    Url::parse(
+    let mut url = Url::parse(
         format!(
             "{}://{}{}",
             url.scheme(),
@@ -91,7 +94,17 @@ fn get_relative_url_from_url(url: Url) -> Url {
         )
         .as_str(),
     )
-    .unwrap()
+    .unwrap();
+
+    clean_url_path(&mut url);
+    url
+}
+
+fn clean_url_path(url: &mut Url) -> &mut Url {
+    let pattern = Regex::new(r"/+").unwrap();
+    let new_path = pattern.replace_all(url.path(), "/").to_string();
+    url.set_path(new_path.as_str());
+    url
 }
 
 fn get_folder_path_from_url(url: &Url) -> String {
@@ -121,7 +134,6 @@ async fn save_binary_to_file(opt: &Opt, url: &Url, response: Response) -> Result
     let folder_path = get_folder_path_from_url(url);
     let complete_path = concat_two_paths(opt.output.clone(), folder_path);
     std::fs::create_dir_all(format!("{}", complete_path))?;
-    // let file_path = get_file_path_from_url(url.clone());
     let file_path = get_file_path_from_url(url);
     let mut file = File::create(format!("{}/{}", opt.output.clone(), file_path)).await?;
     file.write_all(&bytes).await?;
@@ -195,9 +207,11 @@ async fn main() -> Result<()> {
 
     let queue = Arc::new(Mutex::new(VecDeque::<String>::new()));
     let downloaded_files = Arc::new(Mutex::new(Vec::<String>::new()));
+    let visited_urls = Arc::new(Mutex::new(Vec::<String>::new()));
 
     for link in links {
         queue.lock().unwrap().push_back(link);
+        // visited_urls.lock().unwrap().push();
     }
 
     let mut tasks: Vec<JoinHandle<Result<()>>> = vec![];
@@ -206,13 +220,18 @@ async fn main() -> Result<()> {
         let link_maybe = queue.lock().unwrap().pop_front();
         tasks.retain(|task| !task.is_finished());
         if let Some(link) = link_maybe {
-            // let url = Url::parse(format!("{}/{}", opt.uri, link.clone()).as_str())?;
-            let url = Url::parse(format!("{}/{}", opt.uri, link).as_str())?;
+            let url = Url::parse(format!("{}{}", opt.uri, link).as_str())?;
+            if visited_urls.lock().unwrap().contains(&url.to_string()) {
+                continue;
+            } else {
+                visited_urls.lock().unwrap().push(url.to_string());
+            }
             tasks.push(tokio::spawn(download_file(
                 opt.clone(),
                 url,
                 queue.clone(),
                 downloaded_files.clone(),
+                visited_urls.clone(),
             )));
         } else {
             let is_not_done = tasks.iter().any(|task| !task.is_finished());
