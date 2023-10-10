@@ -11,7 +11,7 @@ use structopt::StructOpt;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
-use urlencoding::{decode, encode};
+use urlencoding::decode;
 
 fn extract_links_from_html(html: &str) -> Vec<String> {
     let fragment = Html::parse_fragment(html);
@@ -51,7 +51,6 @@ fn extract_links_from_css(css: &str) -> Vec<String> {
         .find_iter(css)
         .map(|m| {
             let link = m.as_str().to_string();
-            // link.replace("url(\'", "").replace("\')", "")
             decode(&link.replace("url(\'", "").replace("\')", ""))
                 .expect("UTF-8")
                 .into_owned()
@@ -72,16 +71,10 @@ async fn download_file(
     visited_urls: Arc<Mutex<Vec<String>>>,
     client: Arc<Mutex<Client>>,
 ) -> Result<()> {
-    // let url_encoded_url: String = encode(&url.to_string()).into_owned();
     let url_string = url.to_string().replace("?", "%3F");
-    println!("url: {}", url_string);
     let get = client.lock().unwrap().get(url_string);
     let response = get.send().await?;
-    // let response = reqwest::get(url.clone()).await?;
     if is_text_file(url.to_string(), &response).await? {
-        if url.to_string().contains(".woff") {
-            println!("url text file: {}", url.to_string());
-        }
         let relative_url = get_relative_url_from_url(url.clone());
         let url_string = url.to_string();
         let text_file = response.text().await?;
@@ -90,18 +83,14 @@ async fn download_file(
             add_link_to_queue(links, relative_url, queue, &downloaded_files, visited_urls)?;
         } else if url_string.ends_with(".css") {
             let links = extract_links_from_css(&text_file);
-            println!("links: {:?}", links);
             add_link_to_queue(links, relative_url, queue, &downloaded_files, visited_urls)?;
         }
         save_text_to_file(&opt, &url, text_file).await?;
     } else {
-        if url.to_string().contains(".woff") {
-            println!("url binary file: {}", url.to_string());
-        }
         save_binary_to_file(&opt, &url, response).await?;
     }
     downloaded_files.lock().unwrap().push(url.to_string());
-    // println!("downloaded file: {}", url.clone());
+    println!("downloaded file: {}", url.clone());
 
     Ok(())
 }
