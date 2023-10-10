@@ -67,7 +67,6 @@ async fn download_file(
     opt: Opt,
     url: Url,
     queue: Arc<Mutex<VecDeque<String>>>,
-    downloaded_files: Arc<Mutex<Vec<String>>>,
     visited_urls: Arc<Mutex<Vec<String>>>,
     client: Arc<Mutex<Client>>,
 ) -> Result<()> {
@@ -80,16 +79,15 @@ async fn download_file(
         let text_file = response.text().await?;
         if url_string.ends_with(".html") || url_string.ends_with(".htm") {
             let links = extract_links_from_html(&text_file);
-            add_link_to_queue(links, relative_url, queue, &downloaded_files, visited_urls)?;
+            add_link_to_queue(links, relative_url, queue, visited_urls)?;
         } else if url_string.ends_with(".css") {
             let links = extract_links_from_css(&text_file);
-            add_link_to_queue(links, relative_url, queue, &downloaded_files, visited_urls)?;
+            add_link_to_queue(links, relative_url, queue, visited_urls)?;
         }
         save_text_to_file(&opt, &url, text_file).await?;
     } else {
         save_binary_to_file(&opt, &url, response).await?;
     }
-    downloaded_files.lock().unwrap().push(url.to_string());
     println!("downloaded file: {}", url.clone());
 
     Ok(())
@@ -99,17 +97,12 @@ fn add_link_to_queue(
     links: Vec<String>,
     relative_url: Url,
     queue: Arc<Mutex<VecDeque<String>>>,
-    downloaded_files: &Arc<Mutex<Vec<String>>>,
     visited_urls: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), anyhow::Error> {
     Ok(for link in links {
         let new_url = relative_url.join(link.as_str())?;
         let file_path = get_file_path_from_url(&new_url);
         if queue.lock().unwrap().contains(&file_path.clone())
-            || downloaded_files
-                .lock()
-                .unwrap()
-                .contains(&file_path.clone())
             || visited_urls.lock().unwrap().contains(&new_url.to_string())
         {
             continue;
@@ -249,7 +242,6 @@ async fn main() -> Result<()> {
         .collect();
 
     let queue = Arc::new(Mutex::new(VecDeque::<String>::new()));
-    let downloaded_files = Arc::new(Mutex::new(Vec::<String>::new()));
     let visited_urls = Arc::new(Mutex::new(Vec::<String>::new()));
     let client = Arc::new(Mutex::new(reqwest::Client::new()));
 
@@ -273,7 +265,6 @@ async fn main() -> Result<()> {
                 opt.clone(),
                 url,
                 queue.clone(),
-                downloaded_files.clone(),
                 visited_urls.clone(),
                 client.clone(),
             )));
