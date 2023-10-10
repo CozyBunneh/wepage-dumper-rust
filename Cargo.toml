@@ -14,3 +14,4 @@ futures = "0.3.28"
 anyhow = "1.0.71"
 tokio = { versopm = "1.28.2", features = ["full"] }
 regex = "1.10.0"
+urlencoding = "2.1.3"

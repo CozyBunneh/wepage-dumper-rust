@@ -5,14 +5,15 @@ use std::time::Duration;
 
 use anyhow::{Ok, Result};
 use regex::Regex;
-use reqwest::{Response, Url};
+use reqwest::{Client, Response, Url};
 use scraper::{Html, Selector};
 use structopt::StructOpt;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
+use urlencoding::{decode, encode};
 
-fn extract_links(html: &str) -> Vec<String> {
+fn extract_links_from_html(html: &str) -> Vec<String> {
     let fragment = Html::parse_fragment(html);
     let link_selector = Selector::parse("link[href]").unwrap();
     let anchor_selector = Selector::parse("a[href]").unwrap();
@@ -44,6 +45,21 @@ fn extract_links(html: &str) -> Vec<String> {
     links
 }
 
+fn extract_links_from_css(css: &str) -> Vec<String> {
+    let pattern = Regex::new(r"url\('[\./\w\-\\%=]+'\)").unwrap();
+    let urls: Vec<String> = pattern
+        .find_iter(css)
+        .map(|m| {
+            let link = m.as_str().to_string();
+            // link.replace("url(\'", "").replace("\')", "")
+            decode(&link.replace("url(\'", "").replace("\')", ""))
+                .expect("UTF-8")
+                .into_owned()
+        })
+        .collect();
+    urls
+}
+
 fn concat_two_paths(path1: String, path2: String) -> String {
     format!("{}/{}", path1, path2).trim_matches('/').to_string()
 }
@@ -54,34 +70,63 @@ async fn download_file(
     queue: Arc<Mutex<VecDeque<String>>>,
     downloaded_files: Arc<Mutex<Vec<String>>>,
     visited_urls: Arc<Mutex<Vec<String>>>,
+    client: Arc<Mutex<Client>>,
 ) -> Result<()> {
-    let response = reqwest::get(url.clone()).await?;
-    if is_text_file(&response).await? {
+    // let url_encoded_url: String = encode(&url.to_string()).into_owned();
+    let url_string = url.to_string().replace("?", "%3F");
+    println!("url: {}", url_string);
+    let get = client.lock().unwrap().get(url_string);
+    let response = get.send().await?;
+    // let response = reqwest::get(url.clone()).await?;
+    if is_text_file(url.to_string(), &response).await? {
+        if url.to_string().contains(".woff") {
+            println!("url text file: {}", url.to_string());
+        }
         let relative_url = get_relative_url_from_url(url.clone());
+        let url_string = url.to_string();
         let text_file = response.text().await?;
-        let links = extract_links(&text_file);
-        for link in links {
-            let new_url = relative_url.join(link.as_str())?;
-            let file_path = get_file_path_from_url(&new_url);
-            if queue.lock().unwrap().contains(&file_path.clone())
-                || downloaded_files
-                    .lock()
-                    .unwrap()
-                    .contains(&file_path.clone())
-                || visited_urls.lock().unwrap().contains(&new_url.to_string())
-            {
-                continue;
-            }
-            queue.lock().unwrap().push_back(file_path.clone());
+        if url_string.ends_with(".html") || url_string.ends_with(".htm") {
+            let links = extract_links_from_html(&text_file);
+            add_link_to_queue(links, relative_url, queue, &downloaded_files, visited_urls)?;
+        } else if url_string.ends_with(".css") {
+            let links = extract_links_from_css(&text_file);
+            println!("links: {:?}", links);
+            add_link_to_queue(links, relative_url, queue, &downloaded_files, visited_urls)?;
         }
         save_text_to_file(&opt, &url, text_file).await?;
     } else {
+        if url.to_string().contains(".woff") {
+            println!("url binary file: {}", url.to_string());
+        }
         save_binary_to_file(&opt, &url, response).await?;
     }
     downloaded_files.lock().unwrap().push(url.to_string());
-    println!("downloaded file: {}", url.clone());
+    // println!("downloaded file: {}", url.clone());
 
     Ok(())
+}
+
+fn add_link_to_queue(
+    links: Vec<String>,
+    relative_url: Url,
+    queue: Arc<Mutex<VecDeque<String>>>,
+    downloaded_files: &Arc<Mutex<Vec<String>>>,
+    visited_urls: Arc<Mutex<Vec<String>>>,
+) -> Result<(), anyhow::Error> {
+    Ok(for link in links {
+        let new_url = relative_url.join(link.as_str())?;
+        let file_path = get_file_path_from_url(&new_url);
+        if queue.lock().unwrap().contains(&file_path.clone())
+            || downloaded_files
+                .lock()
+                .unwrap()
+                .contains(&file_path.clone())
+            || visited_urls.lock().unwrap().contains(&new_url.to_string())
+        {
+            continue;
+        }
+        queue.lock().unwrap().push_back(file_path.clone());
+    })
 }
 
 fn get_relative_url_from_url(url: Url) -> Url {
@@ -123,10 +168,12 @@ fn get_folder_path_from_url(url: &Url) -> String {
 
 fn get_file_path_from_url(url: &Url) -> String {
     let url_str = url.to_string();
-    url_str.replace(
+    decode(&url_str.replace(
         &format!("{}://{}/", url.scheme(), url.host_str().unwrap()),
         "",
-    )
+    ))
+    .expect("UTF-8")
+    .into_owned()
 }
 
 async fn save_binary_to_file(opt: &Opt, url: &Url, response: Response) -> Result<()> {
@@ -157,7 +204,14 @@ async fn save_text_to_file(opt: &Opt, url: &Url, file_str: String) -> Result<()>
     Ok(())
 }
 
-async fn is_text_file(response: &Response) -> Result<bool> {
+async fn is_text_file(url: String, response: &Response) -> Result<bool> {
+    let font_files = vec![".woff", ".eot", ".ttf"];
+    for font_file in font_files {
+        if url.contains(font_file) {
+            return Ok(false);
+        }
+    }
+
     let content_type = response.headers().get(reqwest::header::CONTENT_TYPE);
     if let Some(content_type) = content_type {
         let content_type_str = content_type.to_str()?;
@@ -199,7 +253,7 @@ async fn main() -> Result<()> {
     let url = Url::parse(opt.uri.clone().as_str())?;
     let response = reqwest::get(url.clone()).await?;
     let html = response.text().await?;
-    let links: Vec<String> = extract_links(&html)
+    let links: Vec<String> = extract_links_from_html(&html)
         .iter()
         .filter(|link| **link != "index.html".to_string())
         .map(|link| link.clone())
@@ -208,10 +262,10 @@ async fn main() -> Result<()> {
     let queue = Arc::new(Mutex::new(VecDeque::<String>::new()));
     let downloaded_files = Arc::new(Mutex::new(Vec::<String>::new()));
     let visited_urls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let client = Arc::new(Mutex::new(reqwest::Client::new()));
 
     for link in links {
         queue.lock().unwrap().push_back(link);
-        // visited_urls.lock().unwrap().push();
     }
 
     let mut tasks: Vec<JoinHandle<Result<()>>> = vec![];
@@ -232,6 +286,7 @@ async fn main() -> Result<()> {
                 queue.clone(),
                 downloaded_files.clone(),
                 visited_urls.clone(),
+                client.clone(),
             )));
         } else {
             let is_not_done = tasks.iter().any(|task| !task.is_finished());
